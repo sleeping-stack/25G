@@ -57,6 +57,32 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define PS1_Pin GPIO_PIN_10
+#define PS1_GPIO_Port GPIOC
+#define PS2_Pin GPIO_PIN_11
+#define PS2_GPIO_Port GPIOC
+#define PS3_Pin GPIO_PIN_12
+#define PS3_GPIO_Port GPIOC
+#define PS0_Pin GPIO_PIN_0
+#define PS0_GPIO_Port GPIOD
+#define SDIO1_Pin GPIO_PIN_1
+#define SDIO1_GPIO_Port GPIOD
+#define RESET_Pin GPIO_PIN_2
+#define RESET_GPIO_Port GPIOD
+#define SDIO2_Pin GPIO_PIN_3
+#define SDIO2_GPIO_Port GPIOD
+#define UPDATE_Pin GPIO_PIN_4
+#define UPDATE_GPIO_Port GPIOD
+#define SDIO3_Pin GPIO_PIN_5
+#define SDIO3_GPIO_Port GPIOD
+#define SDIO0_Pin GPIO_PIN_6
+#define SDIO0_GPIO_Port GPIOD
+#define SCLK_Pin GPIO_PIN_7
+#define SCLK_GPIO_Port GPIOD
+#define CS_Pin GPIO_PIN_3
+#define CS_GPIO_Port GPIOB
+#define PDC_Pin GPIO_PIN_4
+#define PDC_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

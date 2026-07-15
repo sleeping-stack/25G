@@ -219,9 +219,7 @@ SECTIONS
   .user_data (NOLOAD) :
   {
     . = ALIGN(4);
-    *(.FFT_BUF_4096)      /* 4096点FFT段 (fft_outputbuf + hanning_window) */
-    *(.FFT_BUF_8192)      /* 8192点FFT段 (fft_inputbuf) */
-    *(.ADC_SAMPLE_BUF)    /* ADC采样段 */
+    KEEP(*(.DMA_BUF))    /* DMA 缓冲区，防止被 --gc-sections 回收 */
     . = ALIGN(4);
   } > RAM
 

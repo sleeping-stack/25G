@@ -3,3 +3,6 @@ mx.scratch
 .settings
 .clang-format
 .clangd
+.vscode
+AGENTS.md
+docs
