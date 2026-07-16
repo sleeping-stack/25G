@@ -75,3 +75,6 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Add user defined libraries
     CMSISDSP
 )
+
+# 支持浮点数 printf
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -u _printf_float") 

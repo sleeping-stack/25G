@@ -214,7 +214,6 @@ SECTIONS
   PROVIDE( __arm32_tls_tcb_offset = MAX(8, __tls_align) );
   PROVIDE( __arm64_tls_tcb_offset = MAX(16, __tls_align) );
 
-  /* 将 4096点FFT、8192点FFT、ADC数组 全部规整到大容量的 RAM 中 */
   /* 放在 .bss 之前，确保链接器正确匹配，不被 *(.bss*) 误捕获 */
   .user_data (NOLOAD) :
   {

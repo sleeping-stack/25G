@@ -27,12 +27,12 @@
 /* 建模激励目标 Vpp */
 #define SYSID_TARGET_VPP 2.0f
 /* 闭环容差与增益 */
-#define SYSID_AMP_TOL 0.05f
+#define SYSID_AMP_TOL 0.005f
 #define SYSID_AMP_GAIN 0.8f
 
 /* SK 迭代参数 */
-#define SYSID_SK_MAX_ITER 5u     /* 最大迭代次数（第 0 轮即 Levy） */
-#define SYSID_SK_D_FLOOR  1e-6f  /* |D_prev|² 下限，防止极点处权重爆炸 */
+#define SYSID_SK_MAX_ITER 20u /* 最大迭代次数（第 0 轮即 Levy） */
+#define SYSID_SK_D_FLOOR 1e-6f /* |D_prev|² 下限，防止极点处权重爆炸 */
 
 /* ---- 静态缓冲（DTCMRAM，CPU 专用，零等待） ---- */
 static float fft_in[SYSID_N];
@@ -150,6 +150,80 @@ static void sysid_stable_amp(uint32_t freq_hz, float target_vpp)
         adc_start_dual_oneshot();
         adc_unpack_xy(adc_x, adc_y);
         float actual = sysid_measure_vpp(bin);
+        float err = target_vpp - actual;
+        if (fabsf(err) < SYSID_AMP_TOL)
+        {
+            break;
+        }
+        int32_t delta = (int32_t)(err / DDS_VPP_PER_REG * SYSID_AMP_GAIN);
+        int32_t new_reg = (int32_t)reg + delta;
+        if (new_reg < 0)
+        {
+            new_reg = 0;
+        }
+        else if (new_reg > 1023)
+        {
+            new_reg = 1023;
+        }
+        reg = (uint16_t)new_reg;
+        dds_set_amp_raw(reg);
+    }
+}
+
+/**
+ * @brief   由 ADC1 采样计算 DDS 实际输出 Vpp（RMS 时域法）。
+ * @retval  实际 Vpp（V）。
+ * @note    块均值去直流后求 RMS：Vpp = 4·√2·3.3·RMS_code/65535 ≈ 18.668·RMS_code/65535。
+ *          推导：ADC 输入衰减÷2，故 V_real = 2·V_adc_ac；正弦 Vpp = 2·√2·V_rms_ac；
+ *          RMS_code = sqrt(mean((x-mean)²))，V_adc_ac = 3.3·RMS_code/65535。
+ *          不依赖 FFT bin 对齐，100Hz~3kHz 全覆盖精确。
+ *          使用前需已调用 adc_start_dual_oneshot + adc_unpack_xy 填好 adc_x。
+ */
+static float sysid_measure_vpp_rms(void)
+{
+    float mean = 0.0f;
+    for (uint32_t i = 0; i < SYSID_N; ++i)
+    {
+        mean += (float)adc_x[i];
+    }
+    mean /= (float)SYSID_N;
+
+    float sq = 0.0f;
+    for (uint32_t i = 0; i < SYSID_N; ++i)
+    {
+        float d = (float)adc_x[i] - mean;
+        sq += d * d;
+    }
+    float rms_code = sqrtf(sq / (float)SYSID_N);
+    return 18.668f * rms_code / 65535.0f;
+}
+
+/**
+ * @brief   DDS 幅度闭环校准（RMS 法，独立于 sysid_run）。
+ *          迭代调整 reg 使 ADC1 实测 DDS Vpp 达 target_vpp。
+ * @param   freq_hz    频率（Hz）。
+ * @param   target_vpp 目标 DDS 输出峰峰值（V）。
+ * @retval  无。
+ * @note    校准后 DDS 保持输出（不 stop）。硬件极限处 reg 饱和 1023。
+ */
+void sysid_calibrate_dds(uint32_t freq_hz, float target_vpp)
+{
+    dds_set_freq(freq_hz);
+    HAL_Delay(5);
+
+    uint16_t reg = (uint16_t)(target_vpp / DDS_VPP_PER_REG + 0.5f);
+    if (reg > 1023u)
+    {
+        reg = 1023u;
+    }
+    dds_set_amp_raw(reg);
+
+    for (uint32_t iter = 0; iter < 25u; ++iter)
+    {
+        HAL_Delay(3);
+        adc_start_dual_oneshot();
+        adc_unpack_xy(adc_x, adc_y);
+        float actual = sysid_measure_vpp_rms();
         float err = target_vpp - actual;
         if (fabsf(err) < SYSID_AMP_TOL)
         {

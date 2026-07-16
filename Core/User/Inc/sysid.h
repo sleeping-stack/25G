@@ -36,4 +36,15 @@ filter_type_t sysid_run(float b_out[3], float a_out[3]);
   */
 const char *sysid_type_str(filter_type_t t);
 
+/**
+  * @brief   DDS 幅度闭环校准：采样 ADC1(DDS 输出) 并迭代调整 reg 使实际 Vpp 达目标。
+  *          用 RMS 时域法测量（100Hz~3kHz 全覆盖精确，不依赖 FFT bin 对齐）。
+  *          校准后 DDS 保持输出（不 stop），最终 reg 留在收敛值。
+  * @param   freq_hz    频率（Hz）。
+  * @param   target_vpp 目标 DDS 输出峰峰值（V）。
+  * @retval  无。
+  * @note    独立于 sysid_run，可在未建模时调用。内部用 adc_start_dual_oneshot 采样。
+  */
+void sysid_calibrate_dds(uint32_t freq_hz, float target_vpp);
+
 #endif /* __SYSID_H */

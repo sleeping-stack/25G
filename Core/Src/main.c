@@ -29,6 +29,7 @@
 /* USER CODE BEGIN Includes */
 #include "app_state.h"
 #include "AD9959.h"
+#include "adc_sampling.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -108,6 +109,9 @@ int main(void)
     MX_DAC1_Init();
     /* USER CODE BEGIN 2 */
     app_init();
+
+    Write_frequency(3, 1000);
+    Write_Amplitude(3, 1023);
     /* USER CODE END 2 */
 
     /* Infinite loop */
