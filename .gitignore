@@ -2,6 +2,7 @@ build
 mx.scratch
 .settings
 .clang-format
+.clang-tidy
 .clangd
 .vscode
 AGENTS.md

@@ -8,7 +8,6 @@
  */
 #include "ui.h"
 #include "usart.h"
-#include <stdarg.h>
 #include <string.h>
 
 extern UART_HandleTypeDef huart1;
@@ -62,21 +61,4 @@ void ui_show_filter_type(const char *type)
 void ui_show_status(const char *status)
 {
     tjc_send_txt("t1", "txt", status);
-}
-
-/**
- * @brief   打印日志（发串口屏 t1 控件，覆盖最新一条）。
- * @param   fmt printf 风格格式串。
- * @retval  无。
- */
-void ui_log(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(ui_buf, sizeof(ui_buf), fmt, ap);
-    va_end(ap);
-    if (n > 0)
-    {
-        tjc_send_txt("t1", "txt", ui_buf);
-    }
 }

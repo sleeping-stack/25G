@@ -253,7 +253,6 @@ void sysid_calibrate_dds(uint32_t freq_hz, float target_vpp)
 static void sysid_measure_at(uint32_t freq_hz, float *Xr, float *Xi, float *Yr, float *Yi)
 {
     dds_set_freq(freq_hz);
-    ui_log("[DDS] start f=%lu\r\n", (unsigned long)freq_hz);
     HAL_Delay(5);
     sysid_stable_amp(freq_hz, SYSID_TARGET_VPP);
     /* 闭环收敛后最后采一次干净数据用于 H 估计 */
@@ -482,11 +481,6 @@ filter_type_t sysid_run(float b_out[3], float a_out[3])
 
         sysid_cdiv(Yr, Yi, Xr, Xi, &H_meas_re[k], &H_meas_im[k]);
         H_freq[k] = f;
-
-        if ((k & 0x1F) == 0)
-        {
-            ui_log("scan %lu/%lu f=%lu", (unsigned long)k, (unsigned long)SYSID_NF, (unsigned long)f);
-        }
     }
 
     /* ---- 阶段 2：SK 迭代 ---- */
@@ -520,7 +514,6 @@ filter_type_t sysid_run(float b_out[3], float a_out[3])
 
         sysid_solve();
         float resid = sysid_compute_resid(x_sol);
-        ui_log("SK iter %lu resid=%.6f", (unsigned long)iter, resid);
 
         if (resid < best_resid)
         {
@@ -541,8 +534,6 @@ filter_type_t sysid_run(float b_out[3], float a_out[3])
     a_out[0] = 1.0f;
     a_out[1] = best_sol[3];
     a_out[2] = best_sol[4];
-
-    ui_log("b=[%.3f %.3f %.3f] a=[1 %.3f %.3f]", b_out[0], b_out[1], b_out[2], a_out[1], a_out[2]);
 
     filter_type_t t = sysid_classify(b_out, a_out);
     ui_show_filter_type(sysid_type_str(t));

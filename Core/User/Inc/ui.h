@@ -32,11 +32,4 @@ void ui_show_filter_type(const char *type);
   */
 void ui_show_status(const char *status);
 
-/**
-  * @brief   打印日志（发串口屏 t1 控件，覆盖最新一条）。
-  * @param   fmt printf 风格格式串。
-  * @retval  无。
-  */
-void ui_log(const char *fmt, ...);
-
 #endif /* __UI_H */

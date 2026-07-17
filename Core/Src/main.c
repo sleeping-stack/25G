@@ -29,7 +29,6 @@
 /* USER CODE BEGIN Includes */
 #include "app_state.h"
 #include "AD9959.h"
-#include "adc_sampling.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/

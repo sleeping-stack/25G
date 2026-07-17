@@ -201,7 +201,6 @@ static void app_exec_page1_set(uint32_t freq_hz, uint32_t amp_div10)
     float dds_vpp = target_vpp / h_mag;
     /* 闭环校准 DDS 实际输出到 dds_vpp（补偿 DDS 非平坦响应），DDS 保持输出 */
     sysid_calibrate_dds(freq_hz, dds_vpp);
-    ui_log("page1 f=%lu tgt=%.1f H=%.3f dds=%.2f", (unsigned long)freq_hz, target_vpp, h_mag, dds_vpp);
 }
 
 /**
@@ -219,7 +218,6 @@ static void app_exec_page0_max(uint32_t freq_hz)
     }
     dds_set_freq(freq_hz);
     dds_set_amp_raw(1023u);
-    ui_log("page0 max f=%lu reg=1023", (unsigned long)freq_hz);
 }
 
 /**

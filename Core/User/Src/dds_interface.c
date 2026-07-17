@@ -8,7 +8,6 @@
  */
 #include "dds_interface.h"
 #include "AD9959.h"
-#include "ui.h"
 
 #define DDS_CHANNEL 3u
 
@@ -19,7 +18,6 @@
 void dds_init(void)
 {
     Init_AD9959();
-    ui_log("[DDS] init\r\n");
 }
 
 /**
@@ -53,5 +51,4 @@ void dds_set_amp_raw(uint16_t reg)
 void dds_stop(void)
 {
     Write_Amplitude(DDS_CHANNEL, 0);
-    ui_log("[DDS] stop\r\n");
 }
