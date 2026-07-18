@@ -48,7 +48,7 @@ extern UART_HandleTypeDef huart1;
 #define SYSID_LM_TOL 1e-6f /* 残差相对变化收敛阈值 */
 
 /* 诊断打印开关：1=学习后经 USART1 打印 LM 轨迹、频点残差与 summary；0=关闭 */
-#define SYSID_DEBUG_PRINT 1u
+#define SYSID_DEBUG_PRINT 0u
 
 /* ---- 静态缓冲（DTCMRAM，CPU 专用，零等待） ---- */
 static float fft_in[SYSID_N];
@@ -416,50 +416,65 @@ static float sysid_compute_resid(const float sol[5])
 }
 
 /**
- * @brief   由辨识 biquad 扫频响 0~π 判定滤波类型。
- * @param   b 分子系数。
- * @param   a 分母系数。
+ * @brief   由辨识 biquad 在三个特殊频点(z=1, z=-1, z=j)的 |H(z)| 判定滤波类型。
+ *          判据：
+ *            低通: |H(1)| 大, |H(-1)| 小
+ *            高通: |H(-1)| 大, |H(1)| 小
+ *            带通: |H(1)| 小, |H(-1)| 小, |H(j)| 大
+ *            带阻: |H(1)| 大, |H(-1)| 大, |H(j)| 小
+ *          「大」= ≥ SMALL·g_max；「小」= < SMALL·g_max。
+ * @param   b 分子系数 [b0,b1,b2]。
+ * @param   a 分母系数 [1,a1,a2]（a[0] 不使用）。
  * @retval  滤波类型。
  */
 static filter_type_t sysid_classify(const float b[3], const float a[3])
 {
-    float gmax = 0.0f, gmin = 1e30f;
-    float g0 = 0.0f, gN = 0.0f;
-    for (uint32_t k = 0; k <= 256; ++k)
-    {
-        float w = SYSID_PI * (float)k / 256.0f;
-        float c1 = cosf(w), s1 = sinf(w);
-        float c2 = cosf(2.0f * w), s2 = sinf(2.0f * w);
-        float nr = b[0] + b[1] * c1 + b[2] * c2;
-        float ni = -(b[1] * s1 + b[2] * s2);
-        float dr = 1.0f + a[1] * c1 + a[2] * c2;
-        float di = -(a[1] * s1 + a[2] * s2);
-        float gmag = sqrtf(nr * nr + ni * ni) / sqrtf(dr * dr + di * di);
-        if (k == 0)
-            g0 = gmag;
-        if (k == 256)
-            gN = gmag;
-        if (gmag > gmax)
-            gmax = gmag;
-        if (gmag < gmin)
-            gmin = gmag;
-    }
-    if (gmin < g0 * 0.3f && gmin < gN * 0.3f && g0 > gmin * 3.0f && gN > gmin * 3.0f)
-    {
-        return FILTER_TYPE_BANDSTOP;
-    }
-    if (gmax > g0 * 3.0f && gmax > gN * 3.0f)
-    {
+    /* z = 1 (ω=0, 直流端): H(1) = (b0+b1+b2)/(1+a1+a2) */
+    float n_dc = b[0] + b[1] + b[2];
+    float d_dc = 1.0f + a[1] + a[2];
+    if (fabsf(d_dc) < 1e-12f)
+        d_dc = (d_dc >= 0.0f) ? 1e-12f : -1e-12f;
+    float g_dc = fabsf(n_dc / d_dc);
+
+    /* z = -1 (ω=π, 折叠频率): H(-1) = (b0-b1+b2)/(1-a1+a2) */
+    float n_nyq = b[0] - b[1] + b[2];
+    float d_nyq = 1.0f - a[1] + a[2];
+    if (fabsf(d_nyq) < 1e-12f)
+        d_nyq = (d_nyq >= 0.0f) ? 1e-12f : -1e-12f;
+    float g_nyq = fabsf(n_nyq / d_nyq);
+
+    /* z = j (ω=π/2, 中心频率): H(j) = ((b0-b2)-j·b1) / ((1-a2)-j·a1) */
+    float nr = b[0] - b[2];
+    float ni = -b[1];
+    float dr = 1.0f - a[2];
+    float di = -a[1];
+    float d2_mid = dr * dr + di * di;
+    if (d2_mid < 1e-24f)
+        d2_mid = 1e-24f;
+    float g_mid = sqrtf((nr * nr + ni * ni) / d2_mid);
+
+    float g_max = g_dc;
+    if (g_nyq > g_max)
+        g_max = g_nyq;
+    if (g_mid > g_max)
+        g_max = g_mid;
+    if (g_max < 1e-12f)
+        return FILTER_TYPE_UNKNOWN;
+
+    const float SMALL = 0.5f; /* 「极小」阈值：相对最大值 */
+
+    /* 带通：直流小、高频小、中频大 */
+    if (g_dc < g_max * SMALL && g_nyq < g_max * SMALL && g_mid >= g_max * SMALL)
         return FILTER_TYPE_BANDPASS;
-    }
-    if (g0 > gN * 3.0f)
-    {
+    /* 带阻：直流大、高频大、中频小 */
+    if (g_dc >= g_max * SMALL && g_nyq >= g_max * SMALL && g_mid < g_max * SMALL)
+        return FILTER_TYPE_BANDSTOP;
+    /* 低通：直流大、高频小 */
+    if (g_dc >= g_max * SMALL && g_nyq < g_max * SMALL)
         return FILTER_TYPE_LOWPASS;
-    }
-    if (gN > g0 * 3.0f)
-    {
+    /* 高通：高频大、直流小 */
+    if (g_nyq >= g_max * SMALL && g_dc < g_max * SMALL)
         return FILTER_TYPE_HIGHPASS;
-    }
     return FILTER_TYPE_UNKNOWN;
 }
 
@@ -519,8 +534,8 @@ static void sysid_dbg_header(void)
  * @param   Ymag  |Y| 模值。
  * @retval  无。
  */
-static void sysid_dbg_row(uint32_t f, float Hmr, float Hmi, float Nr, float Ni, float Dr, float Di,
-                          float Xmag, float Ymag)
+static void sysid_dbg_row(uint32_t f, float Hmr, float Hmi, float Nr, float Ni, float Dr, float Di, float Xmag,
+                          float Ymag)
 {
     float Hm = sqrtf(Hmr * Hmr + Hmi * Hmi);
     float d2 = Dr * Dr + Di * Di;
@@ -532,8 +547,7 @@ static void sysid_dbg_row(uint32_t f, float Hmr, float Hmi, float Nr, float Ni, 
     float er = Hmr - (Nr * Dr + Ni * Di) / d2;
     float ei = Hmi - (Ni * Dr - Nr * Di) / d2;
     float resid = sqrtf(er * er + ei * ei);
-    snprintf(dbg_buf, sizeof(dbg_buf), "%lu,%.4f,%.4f,%.5f,%.2f,%.2f\r\n",
-             (unsigned long)f, Hm, Hf, resid, Xmag, Ymag);
+    snprintf(dbg_buf, sizeof(dbg_buf), "%lu,%.4f,%.4f,%.5f,%.2f,%.2f\r\n", (unsigned long)f, Hm, Hf, resid, Xmag, Ymag);
     sysid_dbg_puts(dbg_buf);
 }
 
@@ -546,9 +560,8 @@ static void sysid_dbg_row(uint32_t f, float Hmr, float Hmi, float Nr, float Ni, 
  */
 static void sysid_dbg_summary(const float sol[5], float resid, uint32_t iters)
 {
-    snprintf(dbg_buf, sizeof(dbg_buf),
-             "# b0=%.6f,b1=%.6f,b2=%.6f,a1=%.6f,a2=%.6f,resid=%.6f,iters=%lu\r\n",
-             sol[0], sol[1], sol[2], sol[3], sol[4], resid, (unsigned long)iters);
+    snprintf(dbg_buf, sizeof(dbg_buf), "# b0=%.6f,b1=%.6f,b2=%.6f,a1=%.6f,a2=%.6f,resid=%.6f,iters=%lu\r\n", sol[0],
+             sol[1], sol[2], sol[3], sol[4], resid, (unsigned long)iters);
     sysid_dbg_puts(dbg_buf);
 }
 
@@ -562,9 +575,8 @@ static void sysid_dbg_summary(const float sol[5], float resid, uint32_t iters)
  */
 static void sysid_dbg_lm_iter(uint32_t iter, float resid, float lambda, float a1, float a2)
 {
-    snprintf(dbg_buf, sizeof(dbg_buf),
-             "# lm_iter=%lu resid=%.6f lambda=%.2e a1=%.6f a2=%.6f\r\n",
-             (unsigned long)iter, resid, lambda, a1, a2);
+    snprintf(dbg_buf, sizeof(dbg_buf), "# lm_iter=%lu resid=%.6f lambda=%.2e a1=%.6f a2=%.6f\r\n", (unsigned long)iter,
+             resid, lambda, a1, a2);
     sysid_dbg_puts(dbg_buf);
 }
 #endif /* SYSID_DEBUG_PRINT */
@@ -844,8 +856,7 @@ filter_type_t sysid_run(float b_out[3], float a_out[3])
         float Ni = -(best_sol[1] * s1 + best_sol[2] * s2);
         float Dr = 1.0f + best_sol[3] * c1 + best_sol[4] * c2;
         float Di = -(best_sol[3] * s1 + best_sol[4] * s2);
-        sysid_dbg_row(H_freq[k], H_meas_re[k], H_meas_im[k], Nr, Ni, Dr, Di,
-                      H_Xmag[k], H_Ymag[k]);
+        sysid_dbg_row(H_freq[k], H_meas_re[k], H_meas_im[k], Nr, Ni, Dr, Di, H_Xmag[k], H_Ymag[k]);
     }
     sysid_dbg_summary(best_sol, best_resid, iters_done);
 #endif /* SYSID_DEBUG_PRINT */

@@ -73,7 +73,10 @@ static void rt_process(uint16_t *adc_buf, uint32_t len, uint16_t *dac_buf)
 {
     for (uint32_t i = 0; i < len; ++i)
     {
-        rt_in[i] = ((float)adc_buf[i] - ADC_OFFSET_CODE) / 32768.0f;
+        /* 除 16384（=65536/4）补偿输入端 ÷2 衰减：rt_in = 2·V_real/3.3，
+         * 使链路增益为 1（DAC 输出 AC 分量 = |H|·输入 AC 分量，无 0.5 因子）。
+         * 题目约束滤波电路输出 Vpp≤2V ⇒ |rt_out|≤2/3.3≈0.606，DAC 不 clip。 */
+        rt_in[i] = ((float)adc_buf[i] - ADC_OFFSET_CODE) / 16384.0f;
     }
     iir_process_block(rt_in, rt_out, len);
     for (uint32_t i = 0; i < len; ++i)
