@@ -14,10 +14,7 @@
 #include "iir_filter.h"
 #include "sysid.h"
 #include "adc.h"
-#include "dac.h"
-#include "tim.h"
 #include "usart.h"
-#include "main.h"
 #include <string.h>
 #include <math.h>
 
@@ -61,33 +58,64 @@ static float rt_in[RT_BLOCK];
 static float rt_out[RT_BLOCK];
 
 /**
- * @brief   实时块处理：ADC→去偏移归一化→IIR→DAC 格式化。
+ * @brief   实时块处理：ADC→去偏移归一化→IIR→线性内插 L=2→DAC 格式化。
  *          去直流用硬编码 ADC_OFFSET_CODE（实时 256 点块均值含信号低频，
  *          不适合自适应；IIR 对直流偏移不敏感，硬编码足够）。
- * @param   adc_buf ADC 数据。
- * @param   len     样本数。
- * @param   dac_buf DAC 输出缓冲。
+ *          DAC 由 TIM7 触发 @ 1.644MHz = 2·fs，故 len 个 ADC 样本内插成
+ *          2·len 个 DAC 样本。块首用上一块末尾样本内插、块末零阶保持，
+ *          消除块边界阶跃。100kHz 输入点数 8.2→16.4，200kHz 4.1→8.2。
+ * @param   adc_buf ADC 数据（len 个样本）。
+ * @param   len     ADC 样本数（=RT_BLOCK=256）。
+ * @param   dac_buf DAC 输出缓冲（写 2·len 个样本）。
  * @retval  无。
  */
 static void rt_process(uint16_t *adc_buf, uint32_t len, uint16_t *dac_buf)
 {
     for (uint32_t i = 0; i < len; ++i)
     {
-        /* 除 16384（=65536/4）补偿输入端 ÷2 衰减：rt_in = 2·V_real/3.3，
-         * 使链路增益为 1（DAC 输出 AC 分量 = |H|·输入 AC 分量，无 0.5 因子）。
-         * 题目约束滤波电路输出 Vpp≤2V ⇒ |rt_out|≤2/3.3≈0.606，DAC 不 clip。 */
-        rt_in[i] = ((float)adc_buf[i] - ADC_OFFSET_CODE) / 16384.0f;
+        rt_in[i] = ((float)adc_buf[i] - ADC_OFFSET_CODE) / 32768.0f;
     }
     iir_process_block(rt_in, rt_out, len);
-    for (uint32_t i = 0; i < len; ++i)
+
+    /* 线性内插 L=2：rt_out[len] → dac_buf[2·len] */
+    static float last_sample = 0.0f; /* 上一块末尾样本，块首内插用 */
+
+    /* dac_buf[0] = (last + rt_out[0]) / 2：块首与上一块末尾内插 */
+    float v = (last_sample + rt_out[0]) * 0.5f * 2048.0f + 2048.0f;
+    if (v < 0.0f)
+        v = 0.0f;
+    else if (v > 4095.0f)
+        v = 4095.0f;
+    dac_buf[0] = (uint16_t)v;
+
+    /* dac_buf[2i+1] = (rt_out[i]+rt_out[i+1])/2, dac_buf[2i+2] = rt_out[i+1] */
+    for (uint32_t i = 0; i < len - 1u; ++i)
     {
-        float v = rt_out[i] * 2048.0f + 2048.0f;
+        float mid = (rt_out[i] + rt_out[i + 1]) * 0.5f;
+        v = mid * 2048.0f + 2048.0f;
         if (v < 0.0f)
             v = 0.0f;
         else if (v > 4095.0f)
             v = 4095.0f;
-        dac_buf[i] = (uint16_t)v;
+        dac_buf[2 * i + 1] = (uint16_t)v;
+
+        v = rt_out[i + 1] * 2048.0f + 2048.0f;
+        if (v < 0.0f)
+            v = 0.0f;
+        else if (v > 4095.0f)
+            v = 4095.0f;
+        dac_buf[2 * i + 2] = (uint16_t)v;
     }
+
+    /* dac_buf[2·len-1] = rt_out[len-1]：块末零阶保持（等下一块来再内插） */
+    v = rt_out[len - 1u] * 2048.0f + 2048.0f;
+    if (v < 0.0f)
+        v = 0.0f;
+    else if (v > 4095.0f)
+        v = 4095.0f;
+    dac_buf[2 * len - 1u] = (uint16_t)v;
+
+    last_sample = rt_out[len - 1u];
 }
 
 /**
@@ -109,7 +137,7 @@ static void rt_ht_cb(uint16_t *buf, uint32_t len)
  */
 static void rt_tc_cb(uint16_t *buf, uint32_t len)
 {
-    rt_process(buf, len, &dac_rt_buf[RT_BLOCK]);
+    rt_process(buf, len, &dac_rt_buf[DAC_RT_BUF_LEN / 2]);
 }
 
 /**
@@ -125,7 +153,12 @@ static void app_exec_learn(void)
     }
     app_state = APP_LEARNING;
     ui_show_status("learning...");
+    ui_show_filter_type(""); /* 清空 t6，学习完成后由 sysid_run 内部刷新 */
+    ui_show_learning_time(0);
+    uint32_t t_start = HAL_GetTick();
     filter_type_t t = sysid_run(iir_b, iir_a);
+    uint32_t elapsed_ms = HAL_GetTick() - t_start;
+    ui_show_learning_time((float)elapsed_ms / 1000.0f);
     (void)t;
     app_state = APP_IDLE;
     ui_show_status("idle");

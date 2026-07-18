@@ -9,9 +9,6 @@
 #ifndef __UI_H
 #define __UI_H
 
-#include <stdint.h>
-#include <stdio.h>
-
 /**
   * @brief   初始化 UI（串口屏开机问候）。
   * @retval  无。
@@ -31,5 +28,12 @@ void ui_show_filter_type(const char *type);
   * @retval  无。
   */
 void ui_show_status(const char *status);
+
+/**
+  * @brief   显示学习用时（发串口屏 t5 控件，格式如 "12.3s"）。
+  * @param   seconds 用时（秒）。
+  * @retval  无。
+  */
+void ui_show_learning_time(float seconds);
 
 #endif /* __UI_H */

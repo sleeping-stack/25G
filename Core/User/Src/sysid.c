@@ -10,16 +10,14 @@
 #include "dds_interface.h"
 #include "adc_sampling.h"
 #include "ui.h"
-#include "usart.h"
 #include "arm_math.h"
 #include <math.h>
-#include <stdio.h>
 #include <string.h>
 
 extern UART_HandleTypeDef huart1;
 
 /* ---- 常量 ---- */
-#define SYSID_FS_HZ (240000000.0f / 293.0f) /* 819112.6 Hz，TIM6 Frequency */
+#define SYSID_FS_HZ (240000000.0f / 292.0f) /* 821917.8 Hz，TIM6 Frequency (Period=291) */
 #define SYSID_N ADC_BUF_SIZE /* 4096 */
 #define SYSID_PI 3.14159265358979f
 
@@ -384,14 +382,15 @@ static void sysid_solve(void)
  * @brief   计算真残差 Σ|H_k - N_k/D_k|²（SK 收敛判据）。
  *          与 Levy 的加权目标不同，这是 SK 迭代的真正优化目标。
  * @param   sol 当前解 [b0,b1,b2,a1,a2]。
+ * @param   nf  参与求和的频点数（前 nf 个），用于两阶段 LM 切换拟合区间。
  * @retval  残差平方和。
  */
-static float sysid_compute_resid(const float sol[5])
+static float sysid_compute_resid(const float sol[5], uint32_t nf)
 {
     float b0 = sol[0], b1 = sol[1], b2 = sol[2];
     float a1 = sol[3], a2 = sol[4];
     float sum = 0.0f;
-    for (uint32_t k = 0; k < SYSID_NF_LOW; ++k)
+    for (uint32_t k = 0; k < nf; ++k)
     {
         float w = 2.0f * SYSID_PI * (float)H_freq[k] / SYSID_FS_HZ;
         float c1 = cosf(w), s1 = sinf(w);
@@ -416,66 +415,115 @@ static float sysid_compute_resid(const float sol[5])
 }
 
 /**
- * @brief   由辨识 biquad 在三个特殊频点(z=1, z=-1, z=j)的 |H(z)| 判定滤波类型。
- *          判据：
- *            低通: |H(1)| 大, |H(-1)| 小
- *            高通: |H(-1)| 大, |H(1)| 小
- *            带通: |H(1)| 小, |H(-1)| 小, |H(j)| 大
- *            带阻: |H(1)| 大, |H(-1)| 大, |H(j)| 小
- *          「大」= ≥ SMALL·g_max；「小」= < SMALL·g_max。
- * @param   b 分子系数 [b0,b1,b2]。
- * @param   a 分母系数 [1,a1,a2]（a[0] 不使用）。
+ * @brief   阈值带宽判定法——直接用扫频测量数据 |H(k)| 判定滤波类型。
+ *          核心思想：以 -3dB 阈值（0.707·A_max）切通带，看合格频点在全频段
+ *          422 点中的分布位置：
+ *            连续集中在最左侧（触及 idx 0，不触及 idx N-1）： 低通 LPF
+ *            连续集中在最右侧（不触及 idx 0，触及 idx N-1）： 高通 HPF
+ *            集中在中间，两端均不触及：                      带通 BPF
+ *            分布在两端，中间出现低于阈值的凹陷：             带阻 BSF
+ *          相比旧的"biquad 系数扫描法"，直接用测量数据，不受 LM 拟合偏差
+ *          （尤其 HPF 高频极点紧贴单位圆、BPF/BSF 高频残差大）影响；对四类
+ *          实测数据（docs/{LPF,HPF,BPF,BSF}_DEBUG.txt）均判定正确。
+ *          工程毛刺防护：判定前对 |H(k)| 做窗口 5 滑动平均，抑制孤立噪声尖峰
+ *          导致的 first_above/last_above 误判；BSF 陷波实测 13 点宽（10.6k~13k，
+ *          约 2.4kHz），远大于窗口 ±400Hz，不会被抹平。
+ * @note    依赖 file-static 测量数组 H_meas_re/H_meas_im/H_freq，需在 sysid_run
+ *          扫频完成后调用。A_max<1e-12 或无合格点时返回 UNKNOWN。
  * @retval  滤波类型。
  */
-static filter_type_t sysid_classify(const float b[3], const float a[3])
+static filter_type_t sysid_classify(void)
 {
-    /* z = 1 (ω=0, 直流端): H(1) = (b0+b1+b2)/(1+a1+a2) */
-    float n_dc = b[0] + b[1] + b[2];
-    float d_dc = 1.0f + a[1] + a[2];
-    if (fabsf(d_dc) < 1e-12f)
-        d_dc = (d_dc >= 0.0f) ? 1e-12f : -1e-12f;
-    float g_dc = fabsf(n_dc / d_dc);
+    /* 1) 提取 422 点测量幅度 |H(k)| = sqrt(re² + im²) */
+    float h[SYSID_NF];
+    for (uint32_t k = 0; k < SYSID_NF; ++k)
+    {
+        h[k] = sqrtf(H_meas_re[k] * H_meas_re[k] + H_meas_im[k] * H_meas_im[k]);
+    }
 
-    /* z = -1 (ω=π, 折叠频率): H(-1) = (b0-b1+b2)/(1-a1+a2) */
-    float n_nyq = b[0] - b[1] + b[2];
-    float d_nyq = 1.0f - a[1] + a[2];
-    if (fabsf(d_nyq) < 1e-12f)
-        d_nyq = (d_nyq >= 0.0f) ? 1e-12f : -1e-12f;
-    float g_nyq = fabsf(n_nyq / d_nyq);
+    /* 2) 滑动平均窗口 5（±2 邻域均值），边界点按可用点数除 */
+    float ha[SYSID_NF];
+    const int32_t W = 2;
+    for (int32_t k = 0; k < (int32_t)SYSID_NF; ++k)
+    {
+        int32_t lo = k - W;
+        int32_t hi = k + W;
+        if (lo < 0)
+        {
+            lo = 0;
+        }
+        if (hi >= (int32_t)SYSID_NF)
+        {
+            hi = (int32_t)SYSID_NF - 1;
+        }
+        float sum = 0.0f;
+        for (int32_t i = lo; i <= hi; ++i)
+        {
+            sum += h[i];
+        }
+        ha[k] = sum / (float)(hi - lo + 1);
+    }
 
-    /* z = j (ω=π/2, 中心频率): H(j) = ((b0-b2)-j·b1) / ((1-a2)-j·a1) */
-    float nr = b[0] - b[2];
-    float ni = -b[1];
-    float dr = 1.0f - a[2];
-    float di = -a[1];
-    float d2_mid = dr * dr + di * di;
-    if (d2_mid < 1e-24f)
-        d2_mid = 1e-24f;
-    float g_mid = sqrtf((nr * nr + ni * ni) / d2_mid);
-
-    float g_max = g_dc;
-    if (g_nyq > g_max)
-        g_max = g_nyq;
-    if (g_mid > g_max)
-        g_max = g_mid;
-    if (g_max < 1e-12f)
+    /* 3) 找峰值 A_max */
+    float a_max = ha[0];
+    for (uint32_t k = 1; k < SYSID_NF; ++k)
+    {
+        if (ha[k] > a_max)
+        {
+            a_max = ha[k];
+        }
+    }
+    if (a_max < 1e-12f)
+    {
         return FILTER_TYPE_UNKNOWN;
+    }
 
-    const float SMALL = 0.5f; /* 「极小」阈值：相对最大值 */
+    /* 4) -3dB 阈值 */
+    const float th = 0.707f * a_max;
 
-    /* 带通：直流小、高频小、中频大 */
-    if (g_dc < g_max * SMALL && g_nyq < g_max * SMALL && g_mid >= g_max * SMALL)
-        return FILTER_TYPE_BANDPASS;
-    /* 带阻：直流大、高频大、中频小 */
-    if (g_dc >= g_max * SMALL && g_nyq >= g_max * SMALL && g_mid < g_max * SMALL)
-        return FILTER_TYPE_BANDSTOP;
-    /* 低通：直流大、高频小 */
-    if (g_dc >= g_max * SMALL && g_nyq < g_max * SMALL)
-        return FILTER_TYPE_LOWPASS;
-    /* 高通：高频大、直流小 */
-    if (g_nyq >= g_max * SMALL && g_dc < g_max * SMALL)
-        return FILTER_TYPE_HIGHPASS;
-    return FILTER_TYPE_UNKNOWN;
+    /* 5) 扫一遍找 first_above / last_above / cnt_above */
+    uint32_t first_above = SYSID_NF;
+    uint32_t last_above = 0;
+    uint32_t cnt_above = 0;
+    for (uint32_t k = 0; k < SYSID_NF; ++k)
+    {
+        if (ha[k] >= th)
+        {
+            if (k < first_above)
+            {
+                first_above = k;
+            }
+            last_above = k;
+            ++cnt_above;
+        }
+    }
+    if (cnt_above == 0u)
+    {
+        return FILTER_TYPE_UNKNOWN;
+    }
+
+    /* 6) 判定：看合格区间是否触及左右边界 */
+    int touch_lo = (first_above == 0u);
+    int touch_hi = (last_above == (SYSID_NF - 1u));
+
+    if (touch_lo && touch_hi)
+    {
+        /* 两端均触及阈值：全通或带阻（中间有凹陷） */
+        if (cnt_above == SYSID_NF)
+        {
+            return FILTER_TYPE_UNKNOWN; /* 全频段合格，无滤波特征 */
+        }
+        return FILTER_TYPE_BANDSTOP; /* 两端通带、中间凹陷 */
+    }
+    if (touch_lo && !touch_hi)
+    {
+        return FILTER_TYPE_LOWPASS; /* 通带从最低频起，高频衰减 */
+    }
+    if (!touch_lo && touch_hi)
+    {
+        return FILTER_TYPE_HIGHPASS; /* 通带到最高频，低频衰减 */
+    }
+    return FILTER_TYPE_BANDPASS; /* 通带夹在中间，两端均衰减 */
 }
 
 /**
@@ -566,17 +614,18 @@ static void sysid_dbg_summary(const float sol[5], float resid, uint32_t iters)
 }
 
 /**
- * @brief   打印 LM 每轮收敛轨迹（iter/resid/lambda/a1/a2）。
+ * @brief   打印 LM 每轮收敛轨迹（tag/iter/resid/lambda/a1/a2）。
+ * @param   tag    阶段标签（"s1"=阶段1 低频, "s2"=阶段2 全频）。
  * @param   iter   轮次。
  * @param   resid  本轮残差。
  * @param   lambda 本轮阻尼。
  * @param   a1,a2  本轮分母系数。
  * @retval  无。
  */
-static void sysid_dbg_lm_iter(uint32_t iter, float resid, float lambda, float a1, float a2)
+static void sysid_dbg_lm_iter(const char *tag, uint32_t iter, float resid, float lambda, float a1, float a2)
 {
-    snprintf(dbg_buf, sizeof(dbg_buf), "# lm_iter=%lu resid=%.6f lambda=%.2e a1=%.6f a2=%.6f\r\n", (unsigned long)iter,
-             resid, lambda, a1, a2);
+    snprintf(dbg_buf, sizeof(dbg_buf), "# lm[%s] iter=%lu resid=%.6f lambda=%.2e a1=%.6f a2=%.6f\r\n", tag,
+             (unsigned long)iter, resid, lambda, a1, a2);
     sysid_dbg_puts(dbg_buf);
 }
 #endif /* SYSID_DEBUG_PRINT */
@@ -593,14 +642,15 @@ static void sysid_dbg_lm_iter(uint32_t iter, float resid, float lambda, float a1
  * @param   p 当前参数 [b0,b1,b2,a1,a2]。
  * @param   JTJ_out 输出 5×5 累积（调用前需清零）。
  * @param   JTr_out 输出 5×1 累积（调用前需清零）。
+ * @param   nf  参与求和的频点数（前 nf 个），用于两阶段 LM 切换拟合区间。
  * @retval  无。
  */
-static void sysid_lm_jacobian(const float p[5], float *JTJ_out, float *JTr_out)
+static void sysid_lm_jacobian(const float p[5], float *JTJ_out, float *JTr_out, uint32_t nf)
 {
     float b0 = p[0], b1 = p[1], b2 = p[2];
     float a1 = p[3], a2 = p[4];
 
-    for (uint32_t k = 0; k < SYSID_NF_LOW; ++k)
+    for (uint32_t k = 0; k < nf; ++k)
     {
         float w = 2.0f * SYSID_PI * (float)H_freq[k] / SYSID_FS_HZ;
         float c1 = cosf(w), s1 = sinf(w);
@@ -680,36 +730,61 @@ static void sysid_lm_jacobian(const float p[5], float *JTJ_out, float *JTr_out)
 }
 
 /**
- * @brief   Levenberg-Marquardt 非线性最小二乘精化：直接最小化 Σ|H-N/D|²。
+ * @brief   2 阶 IIR 极点稳定性检查（Jury 判据，a0 归一化为 1）。
+ *          D(z) = 1 + a1·z^-1 + a2·z^-2，两极点全在单位圆内 ⟺
+ *            1 + a1 + a2 > 0
+ *            1 - a1 + a2 > 0
+ *            |a2| < 1
+ * @param   sol [b0,b1,b2,a1,a2]（仅用 a1,a2）。
+ * @retval  1 稳定，0 不稳定。
+ */
+static int sysid_is_stable(const float sol[5])
+{
+    float a1 = sol[3], a2 = sol[4];
+    if ((1.0f + a1 + a2) <= 0.0f)
+        return 0;
+    if ((1.0f - a1 + a2) <= 0.0f)
+        return 0;
+    if (fabsf(a2) >= 1.0f)
+        return 0;
+    return 1;
+}
+
+/**
+ * @brief   LM 单阶段迭代核心：在指定 nf 个频点上最小化 Σ|H-N/D|²。
  *          (JᵀJ + λ·diag(JᵀJ))·Δp = -Jᵀr，λ 信赖域阻尼。
  *          残差下降则接受 Δp、λ/=10；上升则拒绝、λ*=10。best_p 单调取优兜底。
- *          稳定性闸：a2∈[0,1]（极点不出单位圆），违反则拒绝该步。
- *          SYSID_DEBUG_PRINT 时打印每轮轨迹。
- * @param   p_inout 输入初值（Levy 解），输出 LM 精化后最优解 [b0,b1,b2,a1,a2]。
- * @retval  最优残差。
+ *          compute_resid 有 d2<1e-12 保护不会除零，best_p 兜底防发散。
+ *          SYSID_DEBUG_PRINT 时打印每轮轨迹（带 tag 标识阶段）。
+ * @param   p_inout     输入初值，输出本阶段最优解 [b0,b1,b2,a1,a2]。
+ * @param   nf          拟合频点数（前 nf 个）。
+ * @param   lambda_init 初始 λ。
+ * @param   max_iter    最大迭代次数。
+ * @param   tag         调试打印标签（"s1"/"s2"）。
+ * @retval  最优残差（nf 频点上）。
  */
-static float sysid_lm_run(float p_inout[5])
+static float sysid_lm_iterate(float p_inout[5], uint32_t nf, float lambda_init, uint32_t max_iter, const char *tag)
 {
     float p[5];
     memcpy(p, p_inout, sizeof(p));
 
-    float resid = sysid_compute_resid(p);
+    float resid = sysid_compute_resid(p, nf);
     float best_p[5];
     memcpy(best_p, p, sizeof(p));
     float best_resid = resid;
 
-    float lambda = SYSID_LM_LAMBDA_INIT;
+    float lambda = lambda_init;
 
 #if SYSID_DEBUG_PRINT
-    sysid_dbg_lm_iter(0u, resid, lambda, p[3], p[4]);
+    sysid_dbg_lm_iter(tag, 0u, resid, lambda, p[3], p[4]);
 #endif
 
-    for (uint32_t iter = 1u; iter < SYSID_LM_MAX_ITER; ++iter)
+    for (uint32_t iter = 1u; iter < max_iter; ++iter)
     {
         /* 算 JᵀJ, Jᵀr */
         memset(JTJ, 0, sizeof(JTJ));
         memset(JTr, 0, sizeof(JTr));
-        sysid_lm_jacobian(p, JTJ, JTr);
+        sysid_lm_jacobian(p, JTJ, JTr, nf);
 
         /* A = JTJ + λ·diag(JTJ)；b = -JTr */
         memcpy(A_lm, JTJ, sizeof(JTJ));
@@ -748,12 +823,7 @@ static float sysid_lm_run(float p_inout[5])
             p_new[i] = p[i] + dp[i];
         }
 
-        /* 注：原稳定性闸（a2∈[0,1] 硬拒绝）已移除。它阻止 LM 从 Levy 坏初值
-         * (如 HPF a2=-0.64) 收敛到稳定真值(a2=0.783)，导致 LM 完全卡死。
-         * compute_resid 有 d2<1e-12 保护不会除零，best_p 兜底防发散。
-         * 真值稳定，LM 方向对会自然收敛到稳定域。 */
-
-        float resid_new = sysid_compute_resid(p_new);
+        float resid_new = sysid_compute_resid(p_new, nf);
 
         if (resid_new < resid)
         {
@@ -772,7 +842,7 @@ static float sysid_lm_run(float p_inout[5])
                 memcpy(best_p, p, sizeof(p));
             }
 #if SYSID_DEBUG_PRINT
-            sysid_dbg_lm_iter(iter, resid, lambda, p[3], p[4]);
+            sysid_dbg_lm_iter(tag, iter, resid, lambda, p[3], p[4]);
 #endif
             /* 收敛判据：残差相对变化 < tol */
             if (rel < SYSID_LM_TOL)
@@ -789,13 +859,62 @@ static float sysid_lm_run(float p_inout[5])
                 break;
             }
 #if SYSID_DEBUG_PRINT
-            sysid_dbg_lm_iter(iter, resid, lambda, p[3], p[4]);
+            sysid_dbg_lm_iter(tag, iter, resid, lambda, p[3], p[4]);
 #endif
         }
     }
 
     memcpy(p_inout, best_p, sizeof(best_p));
     return best_resid;
+}
+
+/**
+ * @brief   两阶段 Levenberg-Marquardt 精化。
+ *          阶段 1：在 1k-50k（SYSID_NF_LOW=246 点）上求初值——低频数据对
+ *                  LPF/BPF/BSP 足够约束，且保证 Levy 坏初值能收敛。
+ *                  HPF 极点紧贴单位圆（z≈0.986），仅用低频无法唯一约束极点
+ *                  位置，LM 会收敛到 z≈-1 的不稳定错误盆地（残差也低）。
+ *          阶段 2：在 1k-400k（SYSID_NF=422 点，含高频段）上继续精化——
+ *                  高频数据暴露不稳定解在 Nyquist 附近的失配，迫使 LM 移向
+ *                  正确极点位置（z≈0.986）。初值用阶段1 结果，best_p 兜底。
+ *          收敛后做 Jury 稳定性检查：阶段2 解不稳定则回退阶段1；都不稳定则
+ *          仍返回阶段1（调用方 sysid_run 据此决定是否装载系数）。
+ *          SYSID_DEBUG_PRINT 时打印两阶段轨迹。
+ * @param   p_inout 输入初值（Levy 解），输出 LM 精化后最优稳定解 [b0,b1,b2,a1,a2]。
+ * @retval  最优残差（全频段 SYSID_NF 上，供诊断对照）。
+ */
+static float sysid_lm_run(float p_inout[5])
+{
+    /* 阶段 1：1k-50k 求初值 */
+    float p1[5];
+    memcpy(p1, p_inout, sizeof(p1));
+    sysid_lm_iterate(p1, SYSID_NF_LOW, SYSID_LM_LAMBDA_INIT, SYSID_LM_MAX_ITER, "s1");
+
+    /* 阶段 2：1k-400k 精化，初值用阶段1 结果 */
+    float p2[5];
+    memcpy(p2, p1, sizeof(p2));
+    sysid_lm_iterate(p2, SYSID_NF, SYSID_LM_LAMBDA_INIT, SYSID_LM_MAX_ITER, "s2");
+
+    /* Jury 稳定性选择：优先阶段2（高频精化），不稳定则回退阶段1 */
+    float resid_full;
+    if (sysid_is_stable(p2))
+    {
+        memcpy(p_inout, p2, sizeof(p2));
+        resid_full = sysid_compute_resid(p2, SYSID_NF);
+    }
+    else if (sysid_is_stable(p1))
+    {
+        /* 阶段2 不稳定（极点出单位圆），回退阶段1 稳定解 */
+        memcpy(p_inout, p1, sizeof(p1));
+        resid_full = sysid_compute_resid(p1, SYSID_NF);
+    }
+    else
+    {
+        /* 都不稳定，返回阶段1（调用方判 UNKNOWN 时不装载系数） */
+        memcpy(p_inout, p1, sizeof(p1));
+        resid_full = sysid_compute_resid(p1, SYSID_NF);
+    }
+    return resid_full;
 }
 
 /**
@@ -861,15 +980,33 @@ filter_type_t sysid_run(float b_out[3], float a_out[3])
     sysid_dbg_summary(best_sol, best_resid, iters_done);
 #endif /* SYSID_DEBUG_PRINT */
 
-    b_out[0] = best_sol[0];
-    b_out[1] = best_sol[1];
-    b_out[2] = best_sol[2];
-    a_out[0] = 1.0f;
-    a_out[1] = best_sol[3];
-    a_out[2] = best_sol[4];
-
-    filter_type_t t = sysid_classify(b_out, a_out);
-    ui_show_filter_type(sysid_type_str(t));
-    ui_show_status("learn done");
+    /* 稳定性闸：LM 收敛后若极点仍出单位圆，装载会致 IIR 自激（DAC 高频极限环），
+     * 此时写入直通 H=1（b=[1,0,0], a=[1,0,0]）兜底，返回 UNKNOWN 提示失败。
+     * 正常情况下两阶段 LM + Jury 选择已保证稳定，此闸是最后防线。 */
+    filter_type_t t;
+    if (sysid_is_stable(best_sol))
+    {
+        b_out[0] = best_sol[0];
+        b_out[1] = best_sol[1];
+        b_out[2] = best_sol[2];
+        a_out[0] = 1.0f;
+        a_out[1] = best_sol[3];
+        a_out[2] = best_sol[4];
+        t = sysid_classify();
+        ui_show_filter_type(sysid_type_str(t));
+        ui_show_status("learn done");
+    }
+    else
+    {
+        b_out[0] = 1.0f;
+        b_out[1] = 0.0f;
+        b_out[2] = 0.0f;
+        a_out[0] = 1.0f;
+        a_out[1] = 0.0f;
+        a_out[2] = 0.0f;
+        t = FILTER_TYPE_UNKNOWN;
+        ui_show_filter_type(sysid_type_str(t));
+        ui_show_status("unstable");
+    }
     return t;
 }

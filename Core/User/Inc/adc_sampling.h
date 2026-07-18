@@ -26,7 +26,7 @@ extern uint16_t adc_rt_buf[ADC_RT_BUF_LEN];
 
 /** ADC 调理偏移码值：信号衰减一半后抬升约 1.2V
  *  仅实时复现（rt_process）使用此硬编码值；建模（sysid）已改为块均值自适应去直流。 */
-#define ADC_OFFSET_CODE 24824.0f
+#define ADC_OFFSET_CODE 23831.0f
 
 typedef void (*adc_rt_callback_t)(uint16_t *buf, uint32_t len);
 

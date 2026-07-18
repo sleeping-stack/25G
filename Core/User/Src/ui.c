@@ -8,7 +8,7 @@
  */
 #include "ui.h"
 #include "usart.h"
-#include <string.h>
+#include "stdio.h"
 
 extern UART_HandleTypeDef huart1;
 
@@ -61,4 +61,16 @@ void ui_show_filter_type(const char *type)
 void ui_show_status(const char *status)
 {
     tjc_send_txt("t1", "txt", status);
+}
+
+/**
+ * @brief   显示学习用时（发串口屏 t5 控件，格式如 "12.3s"）。
+ * @param   seconds 用时（秒）。
+ * @retval  无。
+ */
+void ui_show_learning_time(float seconds)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1fs", seconds);
+    tjc_send_txt("t5", "txt", buf);
 }
